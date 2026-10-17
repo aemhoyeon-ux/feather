@@ -1,4 +1,4 @@
-name: Build Feather Wildcard IPA
+name: Build Feather Wildcard IPA (Xcode 16)
 
 on:
   workflow_dispatch:
@@ -6,32 +6,43 @@ on:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout with submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Select Xcode (prefer 26.2)
+      - name: Select Xcode 16.4 to avoid Xcode 26 SwiftPM crash
         shell: bash
         run: |
-          set -e
-          if [ -d /Applications/Xcode_26.2.app ]; then
-            sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
-          elif [ -d /Applications/Xcode_26.2.0.app ]; then
-            sudo xcode-select -s /Applications/Xcode_26.2.0.app/Contents/Developer
+          set -euo pipefail
+          echo 'Installed Xcode versions:'
+          ls -d /Applications/Xcode*.app || true
+          if [ -d /Applications/Xcode_16.4.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          elif [ -d /Applications/Xcode_16.4.0.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.4.0.app/Contents/Developer
           else
-            echo 'Xcode 26.2 not installed on this runner; using default Xcode.'
+            echo 'ERROR: Xcode 16.4 unavailable. Refusing to silently fall back to Xcode 26.'
+            exit 1
           fi
           xcodebuild -version
-          xcode-select -p
 
-      - name: Clean build state
+      - name: Verify local Swift packages and submodules
         shell: bash
         run: |
-          rm -rf "$HOME/Library/Developer/Xcode/DerivedData/Feather"*
-          rm -rf .build
+          set -euo pipefail
+          git submodule status
+          for file in Zsign/Package.swift IDeviceKitten/Package.swift NimbleKit/Package.swift AltSourceKit/Package.swift; do
+            test -f "$file" || { echo "Missing package manifest: $file"; exit 1; }
+          done
+          test -f Feather.xcodeproj/project.pbxproj
+
+      - name: Clean SwiftPM caches
+        shell: bash
+        run: |
+          rm -rf "$HOME/Library/Developer/Xcode/DerivedData/Feather"* .build _build
 
       - name: Build unsigned IPA
         shell: bash
