@@ -103,9 +103,14 @@ final class SigningHandler: NSObject {
 		// iOS "26" (19) needs special treatment
 		try await _locateMachosAndFixupArm64eSlice(for: movedAppPath)
 		
-		if _options.mergeEntitlements && _options.appEntitlementsFile == nil {
-			try await _mergeEntitlements(for: movedAppPath, with: _options)
-		}
+		if _options.appEntitlementsFile == nil {
+            // Wildcard provisioning must be signed with the concrete bundle identifier.
+            // Preserve the opt-in original entitlement merging behavior otherwise.
+            try await _prepareWildcardEntitlements(for: movedAppPath)
+            if _options.appEntitlementsFile == nil && _options.mergeEntitlements {
+                try await _mergeEntitlements(for: movedAppPath, with: _options)
+            }
+        }
 		
 		let handler = ZsignHandler(appUrl: movedAppPath, options: _options, cert: appCertificate)
 		try await handler.disinject()
@@ -190,6 +195,39 @@ final class SigningHandler: NSObject {
 }
 
 extension SigningHandler {
+    // Build concrete signing entitlements from an Apple wildcard provisioning profile.
+    // This does not add capabilities that are absent from the provisioning profile.
+    private func _prepareWildcardEntitlements(for app: URL) async throws {
+        guard let cert = appCertificate,
+              let profile = CertificateReader(Storage.shared.getFile(.provision, from: cert)).decoded,
+              let profileEntitlements = profile.Entitlements else { return }
+
+        var entitlements: [String: Any] = profileEntitlements.mapValues { $0.value }
+        guard let profileAppID = entitlements["application-identifier"] as? String,
+              profileAppID.hasSuffix(".*"),
+              let bundleID = Bundle(url: app)?.bundleIdentifier,
+              !bundleID.isEmpty,
+              let teamID = profile.TeamIdentifier.first else { return }
+
+        let prefix = String(profileAppID.dropLast(1)) // e.g. TEAM.com.example.
+        guard "\(teamID).\(bundleID)".hasPrefix(prefix) else {
+            throw SigningFileHandlerError.signFailed
+        }
+
+        let fullAppID = "\(teamID).\(bundleID)"
+        entitlements["application-identifier"] = fullAppID
+        if let groups = entitlements["keychain-access-groups"] as? [String] {
+            entitlements["keychain-access-groups"] = groups.map {
+                $0.hasSuffix(".*") ? String($0.dropLast(1)) + bundleID : $0
+            }
+        }
+        // Never copy wildcard values into the final code signature.
+        let plist = try PropertyListSerialization.data(fromPropertyList: entitlements, format: .xml, options: 0)
+        let output = _uniqueWorkDir.appendingPathComponent("wildcard-entitlements.plist")
+        try plist.write(to: output, options: .atomic)
+        _options.appEntitlementsFile = output
+        Logger.signing.info("[\(self._uuid)] Using concrete wildcard application identifier: \(fullAppID)")
+    }
 	private func _modifyDict(using infoDictionary: NSMutableDictionary, with options: Options, to app: URL) async throws {
 		if options.fileSharing { infoDictionary.setObject(true, forKey: "UISupportsDocumentBrowser" as NSCopying) }
 		if options.itunesFileSharing { infoDictionary.setObject(true, forKey: "UIFileSharingEnabled" as NSCopying) }
