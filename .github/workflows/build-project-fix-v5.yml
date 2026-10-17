@@ -1,0 +1,54 @@
+name: Build Feather Wildcard IPA (Project Fix V5)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Checkout submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Check package manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          for pkg in NimbleKit AltSourceKit Zsign IDeviceKitten; do
+            test -f "$pkg/Package.swift" || { echo "Missing $pkg/Package.swift"; exit 1; }
+          done
+          plutil -lint Feather.xcodeproj/project.pbxproj
+      - name: Build unsigned Feather app
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -project Feather.xcodeproj -scheme Feather -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/feather-v5-derived" \
+            -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO build \
+            2>&1 | tee "$RUNNER_TEMP/feather-v5-build.log"
+      - name: Package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=$(find "$RUNNER_TEMP/feather-v5-derived/Build/Products/Release-iphoneos" -maxdepth 1 -type d -name '*.app' -print -quit)
+          test -n "$APP"
+          mkdir -p package/Payload
+          ditto "$APP" package/Payload/Feather.app
+          (cd package && zip -qry ../Feather-unsigned-v5.ipa Payload)
+          unzip -t Feather-unsigned-v5.ipa | tail -1
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feather-unsigned-v5
+          path: Feather-unsigned-v5.ipa
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feather-v5-Build-Log
+          path: ${{ runner.temp }}/feather-v5-build.log
+          if-no-files-found: ignore
