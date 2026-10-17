@@ -1,20 +1,59 @@
 name: Build Feather Wildcard IPA
+
 on:
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
         with:
           submodules: recursive
+
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_26.3.0.app
+        shell: bash
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.3.0.app
+          xcodebuild -version
+
+      - name: Clean stale Swift package state
+        shell: bash
+        run: |
+          rm -rf "$HOME/Library/Developer/Xcode/DerivedData/Feather"*
+          rm -rf .build
+
+      - name: Resolve Swift packages before build
+        shell: bash
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project Feather.xcodeproj \
+            -scheme Feather \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/feather-packages"
+
       - name: Build unsigned IPA
-        run: make iphoneos
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}/
+        run: |
+          make iphoneos
+
       - name: Upload IPA
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Feather-Wildcard-IPA
           path: packages/Feather.ipa
           if-no-files-found: error
+
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feather-Build-Diagnostics
+          path: |
+            *.xcresult
+            *.log
+          if-no-files-found: ignore
