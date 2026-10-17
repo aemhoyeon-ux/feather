@@ -1,66 +1,58 @@
-name: Build Feather Wildcard IPA (Xcode 16)
-
+name: Build Feather Wildcard IPA (direct Xcode)
 on:
   workflow_dispatch:
-
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Checkout with submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Select Xcode 16.4 to avoid Xcode 26 SwiftPM crash
+      - name: Inspect build environment
         shell: bash
         run: |
           set -euo pipefail
-          echo 'Installed Xcode versions:'
-          ls -d /Applications/Xcode*.app || true
-          if [ -d /Applications/Xcode_16.4.app ]; then
-            sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
-          elif [ -d /Applications/Xcode_16.4.0.app ]; then
-            sudo xcode-select -s /Applications/Xcode_16.4.0.app/Contents/Developer
-          else
-            echo 'ERROR: Xcode 16.4 unavailable. Refusing to silently fall back to Xcode 26.'
-            exit 1
-          fi
           xcodebuild -version
-
-      - name: Verify local Swift packages and submodules
+          ls -d /Applications/Xcode*.app || true
+          git submodule status
+          test -f Feather.xcodeproj/project.pbxproj
+      - name: Build unsigned Feather app
         shell: bash
         run: |
           set -euo pipefail
-          git submodule status
-          for file in Zsign/Package.swift IDeviceKitten/Package.swift NimbleKit/Package.swift AltSourceKit/Package.swift; do
-            test -f "$file" || { echo "Missing package manifest: $file"; exit 1; }
-          done
-          test -f Feather.xcodeproj/project.pbxproj
-
-      - name: Clean SwiftPM caches
+          mkdir -p "$RUNNER_TEMP/feather-derived"
+          xcodebuild \
+            -project Feather.xcodeproj \
+            -scheme Feather \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/feather-derived" \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=NO \
+            build 2>&1 | tee "$RUNNER_TEMP/feather-build.log"
+      - name: Package unsigned IPA
         shell: bash
         run: |
-          rm -rf "$HOME/Library/Developer/Xcode/DerivedData/Feather"* .build _build
-
-      - name: Build unsigned IPA
-        shell: bash
-        env:
-          TMPDIR: ${{ runner.temp }}/
-        run: |
-          set -o pipefail
-          make iphoneos 2>&1 | tee "$RUNNER_TEMP/feather-build.log"
-
+          set -euo pipefail
+          APP=$(find "$RUNNER_TEMP/feather-derived/Build/Products/Release-iphoneos" -maxdepth 1 -type d -name '*.app' -print -quit)
+          test -n "$APP" || { echo 'No .app produced'; exit 1; }
+          mkdir -p package/Payload
+          ditto "$APP" "package/Payload/Feather.app"
+          mkdir -p packages
+          (cd package && zip -qry ../packages/Feather-unsigned.ipa Payload)
+          unzip -t packages/Feather-unsigned.ipa | tail -1
       - name: Upload IPA
-        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Feather-Wildcard-IPA
-          path: packages/Feather.ipa
+          name: Feather-unsigned-IPA
+          path: packages/Feather-unsigned.ipa
           if-no-files-found: error
-
-      - name: Upload build log on failure
+      - name: Upload failure log
         if: failure()
         uses: actions/upload-artifact@v4
         with:
